@@ -1,0 +1,122 @@
+name: Deploy All Mirrors
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-mirrors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Deploy to Surge.sh
+        env:
+          SURGE_LOGIN: ${{ secrets.SURGE_LOGIN }}
+          SURGE_TOKEN: ${{ secrets.SURGE_TOKEN }}
+        run: |
+          npx surge . us-pharmacy.surge.sh --token ${{ secrets.SURGE_TOKEN }}
+
+      - name: Deploy to Netlify
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          npx netlify-cli deploy --prod --dir=. --auth=${{ secrets.NETLIFY_AUTH_TOKEN }} --site=${{ secrets.NETLIFY_SITE_ID }}
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy . --project-name=us-pharmacy --branch=main --commit-dirty=true
+
+      - name: Trigger Render Deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          curl -s -X POST "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Accept: application/json"
+
+      - name: Prepare and Deploy to GitHub Pages
+        run: |
+          node -e "
+          const fs = require('fs');
+          const path = require('path');
+          const BASE_PATH = '/us-pharmacy';
+          const GITHUB_ORIGIN = 'https://lacallela.github.io/us-pharmacy';
+          
+          function processDir(dir) {
+            for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, item.name);
+              if (item.name === '.git' || item.name === '.github') continue;
+              if (item.isDirectory()) {
+                processDir(full);
+              } else if (item.name.endsWith('.html') || item.name.endsWith('.xml') || item.name.endsWith('.txt')) {
+                let content = fs.readFileSync(full, 'utf-8');
+                content = content.replaceAll('https://us-pharmacy.surge.sh', GITHUB_ORIGIN);
+                content = content.replaceAll('https://us-pharmacy.vercel.app', GITHUB_ORIGIN);
+                content = content.replaceAll('https://us-pharmacy.pages.dev', GITHUB_ORIGIN);
+                if (item.name.endsWith('.html')) {
+                  content = content.replaceAll('href=\"/_next/', 'href=\"' + BASE_PATH + '/_next/');
+                  content = content.replaceAll('src=\"/_next/', 'src=\"' + BASE_PATH + '/_next/');
+                  content = content.replaceAll('href=\"/drugs', 'href=\"' + BASE_PATH + '/drugs');
+                  content = content.replaceAll('href=\"/quiz', 'href=\"' + BASE_PATH + '/quiz');
+                  content = content.replaceAll('href=\"/compare', 'href=\"' + BASE_PATH + '/compare');
+                  content = content.replaceAll('href=\"/go/', 'href=\"' + BASE_PATH + '/go/');
+                  content = content.replaceAll('href=\"/sitemap.xml\"', 'href=\"' + BASE_PATH + '/sitemap.xml\"');
+                  content = content.replaceAll('href=\"/robots.txt\"', 'href=\"' + BASE_PATH + '/robots.txt\"');
+                  content = content.replaceAll('href=\"/feed.xml\"', 'href=\"' + BASE_PATH + '/feed.xml\"');
+                  content = content.replaceAll('href=\"/\"', 'href=\"' + BASE_PATH + '/\"');
+                }
+                fs.writeFileSync(full, content, 'utf-8');
+              }
+            }
+          }
+          processDir('.');
+          fs.writeFileSync('.nojekyll', '', 'utf-8');
+          "
+
+      - name: Deploy to GitHub Pages branch
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: .
+          keep_files: false
+          exclude_assets: '.github'
+
+      - name: Health Check All 5 Mirrors
+        run: |
+          node -e "
+          const urls = [
+            'https://us-pharmacy.pages.dev/',
+            'https://us-pharmacy.netlify.app/',
+            'https://us-pharmacy.surge.sh/',
+            'https://lacallela.github.io/us-pharmacy/',
+            'https://us-pharmacy.onrender.com/'
+          ];
+          async function check() {
+            for (const u of urls) {
+              try {
+                const res = await fetch(u);
+                console.log(res.status, u);
+              } catch (e) {
+                console.log('ERR', u, e.message);
+              }
+            }
+          }
+          check();
+          "
